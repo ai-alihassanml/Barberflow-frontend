@@ -10,12 +10,14 @@ export default function Home() {
   const [isTextLoading, setIsTextLoading] = useState(false);
   const [isVoiceLoading, setIsVoiceLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState(null);
   
   const textMessagesEndRef = useRef(null);
   const voiceMessagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const speechSynthesisRef = useRef(null);
 
   const scrollToBottom = (ref) => {
     ref.current?.scrollIntoView({ behavior: 'smooth' });
@@ -28,6 +30,15 @@ export default function Home() {
   useEffect(() => {
     scrollToBottom(voiceMessagesEndRef);
   }, [voiceMessages]);
+
+  // Cleanup speech synthesis on unmount
+  useEffect(() => {
+    return () => {
+      if (speechSynthesisRef.current) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
 
   const handleTextSubmit = async (e) => {
     e.preventDefault();
@@ -139,6 +150,9 @@ export default function Home() {
 
   const startRecording = async () => {
     try {
+      // Stop any ongoing speech when starting to record
+      stopSpeaking();
+      
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       
       // Try to use WAV-compatible mime type, fallback to default
@@ -208,6 +222,81 @@ export default function Home() {
     }
   };
 
+  // Text-to-speech function
+  const speakText = (text) => {
+    // Cancel any ongoing speech
+    if (speechSynthesisRef.current) {
+      window.speechSynthesis.cancel();
+    }
+
+    if (!text || !('speechSynthesis' in window)) {
+      console.warn('Speech synthesis not supported');
+      return;
+    }
+
+    setIsSpeaking(true);
+    
+    const utterance = new SpeechSynthesisUtterance(text);
+    
+    // Configure voice settings
+    utterance.rate = 1.0; // Speech rate (0.1 to 10)
+    utterance.pitch = 1.0; // Pitch (0 to 2)
+    utterance.volume = 1.0; // Volume (0 to 1)
+    
+    // Try to use a natural-sounding voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(voice => 
+      voice.lang.includes('en') && (voice.name.includes('Natural') || voice.name.includes('Neural'))
+    ) || voices.find(voice => voice.lang.includes('en')) || voices[0];
+    
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+    }
+
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      speechSynthesisRef.current = null;
+    };
+
+    utterance.onerror = (event) => {
+      console.error('Speech synthesis error:', event);
+      setIsSpeaking(false);
+      speechSynthesisRef.current = null;
+    };
+
+    speechSynthesisRef.current = utterance;
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // Stop speaking
+  const stopSpeaking = () => {
+    if (speechSynthesisRef.current) {
+      window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+      speechSynthesisRef.current = null;
+    }
+  };
+
+  // Load voices when available
+  useEffect(() => {
+    if ('speechSynthesis' in window) {
+      // Some browsers load voices asynchronously
+      const loadVoices = () => {
+        const voices = window.speechSynthesis.getVoices();
+        if (voices.length > 0) {
+          return;
+        }
+      };
+      
+      loadVoices();
+      window.speechSynthesis.onvoiceschanged = loadVoices;
+      
+      return () => {
+        window.speechSynthesis.onvoiceschanged = null;
+      };
+    }
+  }, []);
+
   const handleVoiceSubmit = async (audioBlob) => {
     setIsVoiceLoading(true);
     setError(null);
@@ -221,6 +310,14 @@ export default function Home() {
         { role: 'user', content: result.transcript },
         { role: 'assistant', content: result.reply }
       ]);
+
+      // Automatically speak the assistant's response
+      if (result.reply) {
+        // Small delay to ensure UI updates first
+        setTimeout(() => {
+          speakText(result.reply);
+        }, 300);
+      }
     } catch (err) {
       setError(err.message || 'Failed to process voice message');
     } finally {
@@ -257,6 +354,14 @@ export default function Home() {
         { role: 'user', content: result.transcript },
         { role: 'assistant', content: result.reply }
       ]);
+
+      // Automatically speak the assistant's response
+      if (result.reply) {
+        // Small delay to ensure UI updates first
+        setTimeout(() => {
+          speakText(result.reply);
+        }, 300);
+      }
     } catch (err) {
       const errorMessage = err.message || 'Failed to process audio file';
       setError(errorMessage);
@@ -368,7 +473,7 @@ export default function Home() {
               {voiceMessages.map((msg, idx) => (
                 <div
                   key={idx}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'} items-start gap-2`}
                 >
                   <div
                     className={`max-w-[80%] rounded-lg px-4 py-2 ${
@@ -379,6 +484,16 @@ export default function Home() {
                   >
                     <p className="whitespace-pre-wrap">{msg.content}</p>
                   </div>
+                  {msg.role === 'assistant' && (
+                    <button
+                      onClick={() => speakText(msg.content)}
+                      disabled={isSpeaking}
+                      className="p-2 text-gray-500 hover:text-blue-500 dark:text-gray-400 dark:hover:text-blue-400 disabled:opacity-50 transition-colors"
+                      title="Replay audio"
+                    >
+                      🔊
+                    </button>
+                  )}
                 </div>
               ))}
               
@@ -401,7 +516,7 @@ export default function Home() {
               <div className="flex gap-2">
                 <button
                   onClick={isRecording ? stopRecording : startRecording}
-                  disabled={isVoiceLoading}
+                  disabled={isVoiceLoading || isSpeaking}
                   className={`flex-1 px-6 py-3 rounded-lg font-medium transition-colors ${
                     isRecording
                       ? 'bg-red-500 hover:bg-red-600 text-white'
@@ -418,14 +533,48 @@ export default function Home() {
                     accept="audio/*"
                     onChange={handleFileUpload}
                     className="hidden"
-                    disabled={isVoiceLoading}
+                    disabled={isVoiceLoading || isSpeaking}
                   />
                 </label>
               </div>
               
+              {/* Replay and Stop Speaking Controls */}
+              {voiceMessages.length > 0 && (
+                <div className="flex gap-2">
+                  {voiceMessages.filter(m => m.role === 'assistant').length > 0 && (
+                    <button
+                      onClick={() => {
+                        const lastAssistantMsg = [...voiceMessages].reverse().find(m => m.role === 'assistant');
+                        if (lastAssistantMsg) {
+                          speakText(lastAssistantMsg.content);
+                        }
+                      }}
+                      disabled={isSpeaking || isVoiceLoading}
+                      className="flex-1 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      🔊 Replay Last Response
+                    </button>
+                  )}
+                  {isSpeaking && (
+                    <button
+                      onClick={stopSpeaking}
+                      className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-medium transition-colors"
+                    >
+                      ⏹ Stop Speaking
+                    </button>
+                  )}
+                </div>
+              )}
+              
               {isRecording && (
                 <div className="text-center text-red-500 font-medium animate-pulse">
-                  Recording...
+                  🎤 Recording...
+                </div>
+              )}
+              
+              {isSpeaking && !isRecording && (
+                <div className="text-center text-blue-500 font-medium animate-pulse">
+                  🔊 Speaking...
                 </div>
               )}
             </div>
