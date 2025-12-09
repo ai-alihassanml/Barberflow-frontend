@@ -76,7 +76,17 @@ export async function transcribeAudio(audioFile) {
   });
 
   if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
+    const errorText = await response.text();
+    let errorMessage = `HTTP error! status: ${response.status}`;
+    
+    try {
+      const errorJson = JSON.parse(errorText);
+      errorMessage = errorJson.detail || errorMessage;
+    } catch (e) {
+      errorMessage = errorText || errorMessage;
+    }
+    
+    throw new Error(errorMessage);
   }
 
   return await response.json();
@@ -92,7 +102,17 @@ export async function voiceChat(audioFile) {
   });
 
   if (!response.ok) {
-    throw new Error(`HTTP error! status: ${response.status}`);
+    const errorText = await response.text();
+    let errorMessage = `HTTP error! status: ${response.status}`;
+    
+    try {
+      const errorJson = JSON.parse(errorText);
+      errorMessage = errorJson.detail || errorMessage;
+    } catch (e) {
+      errorMessage = errorText || errorMessage;
+    }
+    
+    throw new Error(errorMessage);
   }
 
   return await response.json();

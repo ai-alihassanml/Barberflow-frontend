@@ -61,10 +61,93 @@ export default function Home() {
     }
   };
 
+  // Convert audio blob to WAV format
+  const convertToWav = async (audioBlob) => {
+    try {
+      const arrayBuffer = await audioBlob.arrayBuffer();
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+      
+      const wav = audioBufferToWav(audioBuffer);
+      return new Blob([wav], { type: 'audio/wav' });
+    } catch (err) {
+      console.error('Audio conversion error:', err);
+      // If conversion fails, return original blob and let backend handle it
+      // Some backends can handle WebM/OGG formats
+      throw new Error('Could not convert audio format. Please try uploading a WAV file.');
+    }
+  };
+
+  // Helper function to convert AudioBuffer to WAV
+  const audioBufferToWav = (buffer) => {
+    const numOfChan = buffer.numberOfChannels;
+    const length = buffer.length * numOfChan * 2 + 44;
+    const bufferArray = new ArrayBuffer(length);
+    const view = new DataView(bufferArray);
+    const channels = [];
+    let sample;
+    let offset = 0;
+    let pos = 0;
+
+    // Write WAV header
+    const setUint16 = (data) => {
+      view.setUint16(pos, data, true);
+      pos += 2;
+    };
+    const setUint32 = (data) => {
+      view.setUint32(pos, data, true);
+      pos += 4;
+    };
+
+    // RIFF identifier
+    setUint32(0x46464952); // "RIFF"
+    setUint32(length - 8); // File length - 8
+    setUint32(0x45564157); // "WAVE"
+
+    // Format chunk identifier
+    setUint32(0x20746d66); // "fmt "
+    setUint32(16); // Format chunk length
+    setUint16(1); // Sample format (raw)
+    setUint16(numOfChan); // Number of channels
+    setUint32(buffer.sampleRate); // Sample rate
+    setUint32(buffer.sampleRate * 2 * numOfChan); // Byte rate
+    setUint16(numOfChan * 2); // Block align
+    setUint16(16); // Bits per sample
+
+    // Data chunk identifier
+    setUint32(0x61746164); // "data"
+    setUint32(length - pos - 4); // Data chunk length
+
+    // Get interleaved data
+    for (let i = 0; i < buffer.numberOfChannels; i++) {
+      channels.push(buffer.getChannelData(i));
+    }
+
+    // Interleave
+    while (pos < length) {
+      for (let i = 0; i < numOfChan; i++) {
+        sample = Math.max(-1, Math.min(1, channels[i][offset]));
+        sample = sample < 0 ? sample * 0x8000 : sample * 0x7FFF;
+        view.setInt16(pos, sample, true);
+        pos += 2;
+      }
+      offset++;
+    }
+
+    return bufferArray;
+  };
+
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      
+      // Try to use WAV-compatible mime type, fallback to default
+      const options = { mimeType: 'audio/webm' };
+      if (!MediaRecorder.isTypeSupported('audio/webm')) {
+        delete options.mimeType;
+      }
+      
+      const mediaRecorder = new MediaRecorder(stream, options);
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
@@ -75,9 +158,40 @@ export default function Home() {
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/wav' });
-        await handleVoiceSubmit(audioBlob);
-        stream.getTracks().forEach(track => track.stop());
+        try {
+          if (audioChunksRef.current.length === 0) {
+            setError('No audio recorded. Please try again.');
+            stream.getTracks().forEach(track => track.stop());
+            return;
+          }
+
+          const audioBlob = new Blob(audioChunksRef.current, { 
+            type: audioChunksRef.current[0]?.type || 'audio/webm' 
+          });
+
+          // Check if audio is too small (likely empty or very short)
+          if (audioBlob.size < 1000) {
+            setError('Recording too short. Please record for at least 1 second.');
+            stream.getTracks().forEach(track => track.stop());
+            return;
+          }
+          
+          // Convert to WAV format for backend compatibility
+          let wavBlob;
+          try {
+            wavBlob = await convertToWav(audioBlob);
+          } catch (convertErr) {
+            // If conversion fails, try sending as-is (some backends might accept it)
+            console.warn('WAV conversion failed, trying original format:', convertErr);
+            wavBlob = audioBlob;
+          }
+          
+          await handleVoiceSubmit(wavBlob);
+        } catch (err) {
+          setError('Failed to process recording: ' + err.message);
+        } finally {
+          stream.getTracks().forEach(track => track.stop());
+        }
       };
 
       mediaRecorder.start();
@@ -122,16 +236,35 @@ export default function Home() {
     setError(null);
 
     try {
-      const result = await voiceChat(file);
+      let audioFile = file;
+      
+      // If file is not WAV, try to convert it
+      if (!file.name.toLowerCase().endsWith('.wav') && !file.type.includes('wav')) {
+        try {
+          audioFile = await convertToWav(file);
+          audioFile = new File([audioFile], file.name.replace(/\.[^/.]+$/, '.wav'), { 
+            type: 'audio/wav' 
+          });
+        } catch (convertErr) {
+          // If conversion fails, try sending original file
+          console.warn('Could not convert audio to WAV, sending original:', convertErr);
+        }
+      }
+      
+      const result = await voiceChat(audioFile);
       setVoiceMessages(prev => [
         ...prev,
         { role: 'user', content: result.transcript },
         { role: 'assistant', content: result.reply }
       ]);
     } catch (err) {
-      setError(err.message || 'Failed to process audio file');
+      const errorMessage = err.message || 'Failed to process audio file';
+      setError(errorMessage);
+      console.error('Voice chat error:', err);
     } finally {
       setIsVoiceLoading(false);
+      // Reset file input
+      e.target.value = '';
     }
   };
 
