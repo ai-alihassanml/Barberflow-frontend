@@ -12,11 +12,18 @@ export default function Home() {
   const [isRecording, setIsRecording] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [error, setError] = useState(null);
-  
+  const [callMessages, setCallMessages] = useState([]);
+  const [isCallRecording, setIsCallRecording] = useState(false);
+  const [isCallProcessing, setIsCallProcessing] = useState(false);
+
   const textMessagesEndRef = useRef(null);
   const voiceMessagesEndRef = useRef(null);
+  const callMessagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
+  const callMediaRecorderRef = useRef(null);
+  const callAudioChunksRef = useRef([]);
+  const callStreamRef = useRef(null);
   const speechSynthesisRef = useRef(null);
 
   const scrollToBottom = (ref) => {
@@ -31,6 +38,10 @@ export default function Home() {
     scrollToBottom(voiceMessagesEndRef);
   }, [voiceMessages]);
 
+  useEffect(() => {
+    scrollToBottom(callMessagesEndRef);
+  }, [callMessages]);
+
   // Cleanup speech synthesis on unmount
   useEffect(() => {
     return () => {
@@ -41,7 +52,9 @@ export default function Home() {
   }, []);
 
   const handleTextSubmit = async (e) => {
-    e.preventDefault();
+    if (e) {
+      e.preventDefault();
+    }
     if (!textInput.trim() || isTextLoading) return;
 
     const userMessage = { role: 'user', content: textInput };
@@ -297,6 +310,107 @@ export default function Home() {
     }
   }, []);
 
+  const handleCallSubmit = async (audioBlob) => {
+    setIsCallProcessing(true);
+    setError(null);
+
+    try {
+      let wavBlob;
+      try {
+        wavBlob = await convertToWav(audioBlob);
+      } catch (convertErr) {
+        console.warn('WAV conversion failed for call, using original format:', convertErr);
+        wavBlob = audioBlob;
+      }
+
+      const audioFile = new File([wavBlob], 'call-recording.wav', { type: 'audio/wav' });
+      const result = await voiceChat(audioFile);
+
+      setCallMessages(prev => [
+        ...prev,
+        { role: 'user', content: result.transcript },
+        { role: 'assistant', content: result.reply }
+      ]);
+
+      if (result.reply) {
+        setTimeout(() => {
+          speakText(result.reply);
+        }, 300);
+      }
+    } catch (err) {
+      setError(err.message || 'Failed to process call audio');
+    } finally {
+      setIsCallProcessing(false);
+    }
+  };
+
+  const startCall = async () => {
+    if (isCallRecording || isCallProcessing) return;
+
+    try {
+      stopSpeaking();
+
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      const options = { mimeType: 'audio/webm' };
+      if (!MediaRecorder.isTypeSupported('audio/webm')) {
+        delete options.mimeType;
+      }
+
+      const mediaRecorder = new MediaRecorder(stream, options);
+      callMediaRecorderRef.current = mediaRecorder;
+      callStreamRef.current = stream;
+      callAudioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          callAudioChunksRef.current.push(event.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        try {
+          if (callAudioChunksRef.current.length === 0) {
+            setError('No audio recorded. Please try again.');
+            return;
+          }
+
+          const audioBlob = new Blob(callAudioChunksRef.current, {
+            type: callAudioChunksRef.current[0]?.type || 'audio/webm',
+          });
+
+          if (audioBlob.size < 1000) {
+            setError('Call was too short. Please speak for at least 1 second.');
+            return;
+          }
+
+          await handleCallSubmit(audioBlob);
+        } catch (err) {
+          setError('Failed to process call audio: ' + err.message);
+        } finally {
+          if (callStreamRef.current) {
+            callStreamRef.current.getTracks().forEach((track) => track.stop());
+            callStreamRef.current = null;
+          }
+          callMediaRecorderRef.current = null;
+          callAudioChunksRef.current = [];
+          setIsCallRecording(false);
+        }
+      };
+
+      mediaRecorder.start();
+      setIsCallRecording(true);
+    } catch (err) {
+      setError('Failed to start call: ' + err.message);
+    }
+  };
+
+  const stopCall = () => {
+    if (callMediaRecorderRef.current && isCallRecording) {
+      callMediaRecorderRef.current.stop();
+    }
+  };
+
   const handleVoiceSubmit = async (audioBlob) => {
     setIsVoiceLoading(true);
     setError(null);
@@ -375,8 +489,8 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 dark:from-gray-900 dark:to-gray-800">
-      <div className="container mx-auto px-4 py-8 max-w-7xl">
-        <h1 className="text-4xl font-bold text-center mb-8 text-gray-800 dark:text-white">
+      <div className="container mx-auto px-4 py-6 sm:py-8 max-w-7xl">
+        <h1 className="text-3xl sm:text-4xl font-bold text-center mb-8 text-gray-800 dark:text-white">
           Barber Booking Agent
         </h1>
 
@@ -386,9 +500,9 @@ export default function Home() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 xl:grid-cols-3">
           {/* Text Chat Section */}
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg flex flex-col h-[600px]">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg flex flex-col min-h-[420px] md:min-h-[520px] lg:h-[560px] xl:h-[600px]">
             <div className="p-4 border-b border-gray-200 dark:border-gray-700">
               <h2 className="text-xl font-semibold text-gray-800 dark:text-white">
                 Text Chat
@@ -435,14 +549,22 @@ export default function Home() {
             </div>
 
             <form onSubmit={handleTextSubmit} className="p-4 border-t border-gray-200 dark:border-gray-700">
-              <div className="flex gap-2">
-                <input
-                  type="text"
+              <div className="flex gap-2 items-end">
+                <textarea
                   value={textInput}
                   onChange={(e) => setTextInput(e.target.value)}
                   placeholder="Type your message..."
-                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white"
+                  rows={1}
+                  className="flex-1 px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:text-white resize-none max-h-32"
                   disabled={isTextLoading}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      if (!isTextLoading && textInput.trim()) {
+                        handleTextSubmit();
+                      }
+                    }
+                  }}
                 />
                 <button
                   type="submit"
@@ -452,11 +574,14 @@ export default function Home() {
                   Send
                 </button>
               </div>
+              <p className="mt-1 text-xs text-gray-400 dark:text-gray-500">
+                Press Enter to send, Shift+Enter for a new line
+              </p>
             </form>
           </div>
 
           {/* Voice Chat Section */}
-          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg flex flex-col h-[600px]">
+          <div className="bg-white dark:bg-gray-800 rounded-lg shadow-lg flex flex-col min-h-[420px] md:min-h-[520px] lg:h-[560px] xl:h-[600px]">
             <div className="p-4 border-b border-gray-200 dark:border-gray-700">
               <h2 className="text-xl font-semibold text-gray-800 dark:text-white">
                 Voice Chat
@@ -576,6 +701,80 @@ export default function Home() {
                 <div className="text-center text-blue-500 font-medium animate-pulse">
                   🔊 Speaking...
                 </div>
+              )}
+            </div>
+          </div>
+
+          {/* Call Preview Section */}
+          <div className="bg-gradient-to-b from-gray-900 via-gray-900 to-black rounded-lg shadow-lg flex flex-col min-h-[420px] md:min-h-[520px] lg:h-[560px] xl:h-[600px] text-white">
+            <div className="p-4 border-b border-gray-800">
+              <h2 className="text-xl font-semibold">
+                Call Preview
+              </h2>
+            </div>
+
+            <div className="flex-1 flex flex-col items-center justify-center px-6 py-6 space-y-6">
+              <div className="flex items-center justify-center w-28 h-28 rounded-full border border-dashed border-gray-700 bg-gray-900/60">
+                <div className={`flex space-x-1 ${isCallRecording || isCallProcessing ? 'animate-pulse' : ''}`}>
+                  <span className="w-1.5 h-6 rounded-full bg-blue-400"></span>
+                  <span className="w-1.5 h-4 rounded-full bg-blue-500"></span>
+                  <span className="w-1.5 h-8 rounded-full bg-blue-400"></span>
+                  <span className="w-1.5 h-5 rounded-full bg-blue-500"></span>
+                  <span className="w-1.5 h-7 rounded-full bg-blue-400"></span>
+                </div>
+              </div>
+
+              <div className="text-center space-y-1">
+                <p className="text-lg font-medium">
+                  {isCallRecording || isCallProcessing ? 'Call in progress' : 'Preview your agent'}
+                </p>
+                <p className="text-sm text-gray-400">
+                  {isCallRecording || isCallProcessing
+                    ? 'Speak naturally, then end the call to hear your barber agent respond.'
+                    : 'Start a live test call to speak to your agent as you configure and iterate.'}
+                </p>
+              </div>
+
+              {callMessages.length > 0 && (
+                <div className="w-full max-h-40 overflow-y-auto bg-black/40 rounded-lg p-3 text-sm space-y-2">
+                  {callMessages.map((msg, idx) => (
+                    <div
+                      key={idx}
+                      className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                    >
+                      <div
+                        className={`max-w-[80%] rounded-lg px-3 py-2 ${
+                          msg.role === 'user'
+                            ? 'bg-blue-500 text-white'
+                            : 'bg-gray-800 text-gray-100'
+                        }`}
+                      >
+                        <p className="whitespace-pre-wrap">{msg.content}</p>
+                      </div>
+                    </div>
+                  ))}
+                  <div ref={callMessagesEndRef} />
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t border-gray-800 space-y-2">
+              <button
+                type="button"
+                onClick={isCallRecording ? stopCall : startCall}
+                disabled={isCallProcessing}
+                className={`w-full px-6 py-3 rounded-lg font-medium transition-colors ${
+                  isCallRecording
+                    ? 'bg-red-500 hover:bg-red-600'
+                    : 'bg-blue-500 hover:bg-blue-600'
+                } text-white disabled:opacity-50 disabled:cursor-not-allowed`}
+              >
+                {isCallRecording ? 'End Call' : 'Start Call'}
+              </button>
+              {isCallProcessing && (
+                <p className="text-xs text-center text-gray-400">
+                  Processing call...
+                </p>
               )}
             </div>
           </div>
