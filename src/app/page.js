@@ -19,6 +19,8 @@ export default function Home() {
   const [callMessages, setCallMessages] = useState([]);
   const [isCallRecording, setIsCallRecording] = useState(false);
   const [isCallProcessing, setIsCallProcessing] = useState(false);
+  const [isCallSpeaking, setIsCallSpeaking] = useState(false);
+  const [conversationalMode, setConversationalMode] = useState(false);
 
   const mediaRecorderRef = useRef(null);
   const audioChunksRef = useRef([]);
@@ -371,6 +373,71 @@ export default function Home() {
     }
   }, [speakText]);
 
+  // Enhanced speakText with interruption support for calls
+  const speakTextWithInterruption = useCallback((text, onComplete, onInterrupt) => {
+    // Cancel any ongoing speech
+    if (speechSynthesisRef.current) {
+      window.speechSynthesis.cancel();
+    }
+
+    if (!text || !('speechSynthesis' in window)) {
+      console.warn('Speech synthesis not supported');
+      if (onComplete) onComplete();
+      return;
+    }
+
+    setIsCallSpeaking(true);
+    
+    // Clean markdown syntax and format for natural speech
+    const cleanedText = cleanMarkdownForSpeech(text);
+    const speechFormattedText = formatForSpeech(cleanedText);
+    
+    // Use the cleaned text for speech synthesis
+    const finalText = speechFormattedText || cleanedText || text;
+    
+    const utterance = new SpeechSynthesisUtterance(finalText);
+    
+    // Configure voice settings
+    utterance.rate = 1.0;
+    utterance.pitch = 1.0;
+    utterance.volume = 1.0;
+    
+    // Try to use a natural-sounding voice
+    const voices = window.speechSynthesis.getVoices();
+    const preferredVoice = voices.find(voice => 
+      voice.lang.includes('en') && (voice.name.includes('Natural') || voice.name.includes('Neural'))
+    ) || voices.find(voice => voice.lang.includes('en')) || voices[0];
+    
+    if (preferredVoice) {
+      utterance.voice = preferredVoice;
+    }
+
+    utterance.onend = () => {
+      setIsCallSpeaking(false);
+      speechSynthesisRef.current = null;
+      if (onComplete) onComplete();
+    };
+
+    utterance.onerror = (event) => {
+      console.error('Speech synthesis error:', event);
+      setIsCallSpeaking(false);
+      speechSynthesisRef.current = null;
+      if (onComplete) onComplete();
+    };
+
+    // Store reference for interruption
+    speechSynthesisRef.current = utterance;
+    window.speechSynthesis.speak(utterance);
+
+    // Return interrupt function
+    return () => {
+      window.speechSynthesis.cancel();
+      setIsCallSpeaking(false);
+      speechSynthesisRef.current = null;
+      if (onInterrupt) onInterrupt();
+    };
+  }, [cleanMarkdownForSpeech, formatForSpeech]);
+
   // Call preview handlers
   const handleCallSubmit = useCallback(async (audioBlob) => {
     setIsCallProcessing(true);
@@ -394,9 +461,13 @@ export default function Home() {
         { role: 'assistant', content: result.reply }
       ]);
 
-      if (result.reply) {
+      if (result.reply && conversationalMode) {
+        // In conversational mode, speak immediately
         setTimeout(() => {
-          speakText(result.reply);
+          speakTextWithInterruption(result.reply, () => {
+            // Speech completed, ready for next input
+            console.log('Call response speech completed');
+          });
         }, 300);
       }
     } catch (err) {
@@ -404,74 +475,60 @@ export default function Home() {
     } finally {
       setIsCallProcessing(false);
     }
-  }, [convertToWav, speakText]);
+  }, [convertToWav, speakTextWithInterruption, conversationalMode]);
+
+  // Handle voice input from conversational call
+  const handleCallVoiceInput = useCallback(async (audioBlob) => {
+    await handleCallSubmit(audioBlob);
+  }, [handleCallSubmit]);
 
   const startCall = useCallback(async () => {
     if (isCallRecording || isCallProcessing) return;
 
     try {
       stopSpeaking();
-
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-      const options = { mimeType: 'audio/webm' };
-      if (!MediaRecorder.isTypeSupported('audio/webm')) {
-        delete options.mimeType;
-      }
-
-      const mediaRecorder = new MediaRecorder(stream, options);
-      callMediaRecorderRef.current = mediaRecorder;
-      callStreamRef.current = stream;
-      callAudioChunksRef.current = [];
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          callAudioChunksRef.current.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = async () => {
-        try {
-          if (callAudioChunksRef.current.length === 0) {
-            setError('No audio recorded. Please try again.');
-            return;
-          }
-
-          const audioBlob = new Blob(callAudioChunksRef.current, {
-            type: callAudioChunksRef.current[0]?.type || 'audio/webm',
-          });
-
-          if (audioBlob.size < 1000) {
-            setError('Call was too short. Please speak for at least 1 second.');
-            return;
-          }
-
-          await handleCallSubmit(audioBlob);
-        } catch (err) {
-          setError('Failed to process call audio: ' + err.message);
-        } finally {
-          if (callStreamRef.current) {
-            callStreamRef.current.getTracks().forEach((track) => track.stop());
-            callStreamRef.current = null;
-          }
-          callMediaRecorderRef.current = null;
-          callAudioChunksRef.current = [];
-          setIsCallRecording(false);
-        }
-      };
-
-      mediaRecorder.start();
+      setConversationalMode(true);
       setIsCallRecording(true);
+      setError(null);
+
+      console.log('Starting conversational call mode');
     } catch (err) {
       setError('Failed to start call: ' + err.message);
+      setConversationalMode(false);
+      setIsCallRecording(false);
     }
-  }, [isCallRecording, isCallProcessing, stopSpeaking, handleCallSubmit]);
+  }, [isCallRecording, isCallProcessing, stopSpeaking]);
 
   const stopCall = useCallback(() => {
-    if (callMediaRecorderRef.current && isCallRecording) {
-      callMediaRecorderRef.current.stop();
+    try {
+      // Stop any ongoing speech
+      if (speechSynthesisRef.current) {
+        window.speechSynthesis.cancel();
+        setIsCallSpeaking(false);
+        speechSynthesisRef.current = null;
+      }
+
+      // Clean up call state
+      setConversationalMode(false);
+      setIsCallRecording(false);
+      setIsCallProcessing(false);
+      setIsCallSpeaking(false);
+
+      console.log('Stopped conversational call mode');
+    } catch (err) {
+      setError('Failed to stop call: ' + err.message);
     }
-  }, [isCallRecording]);
+  }, []);
+
+  // Handle interruption of call speech
+  const handleCallInterrupt = useCallback(() => {
+    if (speechSynthesisRef.current && isCallSpeaking) {
+      window.speechSynthesis.cancel();
+      setIsCallSpeaking(false);
+      speechSynthesisRef.current = null;
+      console.log('Call speech interrupted');
+    }
+  }, [isCallSpeaking]);
 
   // Memoized empty state checks
   const isTextChatEmpty = useMemo(() => textMessages.length === 0, [textMessages.length]);
@@ -517,8 +574,12 @@ export default function Home() {
             messages={callMessages}
             onStartCall={startCall}
             onStopCall={stopCall}
+            onVoiceInput={handleCallVoiceInput}
+            onInterruptSpeaking={handleCallInterrupt}
             isRecording={isCallRecording}
             isProcessing={isCallProcessing}
+            isSpeaking={isCallSpeaking}
+            conversationalMode={conversationalMode}
           />
         </div>
       </div>
