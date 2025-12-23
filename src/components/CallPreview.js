@@ -38,18 +38,23 @@ function CallPreview({
   // Local state
   const [volumeLevel, setVolumeLevel] = useState(0);
   const [vadError, setVadError] = useState(null);
+  
+  // Ref to store the latest startListening function to avoid dependency issues
+  const startListeningRef = useRef(null);
 
   // Auto-scroll messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Handle conversation state changes
+  // Initial start listening when conversation mode is enabled
   useEffect(() => {
-    if (conversation.currentState === 'listening' && conversationalMode) {
-      startListening();
+    if (conversationalMode && conversation.mode === 'conversational' && conversation.currentState === 'listening') {
+      if (startListeningRef.current) {
+        startListeningRef.current();
+      }
     }
-  }, [conversation.currentState, conversationalMode]);
+  }, [conversationalMode, conversation.mode, conversation.currentState]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -57,6 +62,45 @@ function CallPreview({
       cleanup();
     };
   }, []);
+
+  /**
+   * Process audio input and send to backend
+   */
+  const processAudioInput = useCallback(async () => {
+    if (audioChunksRef.current.length === 0) return;
+
+    try {
+      // Ensure we're in processing state (should already be from speech detection)
+      if (conversation.currentState !== 'processing') {
+        conversation.startProcessing();
+      }
+
+      // Create audio blob from chunks
+      const audioBlob = new Blob(audioChunksRef.current, { 
+        type: audioChunksRef.current[0]?.type || 'audio/webm' 
+      });
+
+      // Clear chunks for next recording (but keep MediaRecorder running)
+      audioChunksRef.current = [];
+
+      // Send to parent component for processing
+      if (onVoiceInput) {
+        await onVoiceInput(audioBlob);
+      }
+
+      // Note: MediaRecorder continues recording in the background
+      // VAD continues detecting speech
+      // We'll transition to speaking state when parent starts speaking
+
+    } catch (error) {
+      console.error('Failed to process audio input:', error);
+      conversation.setError(error);
+      // On error, return to listening state
+      if (conversation.mode === 'conversational') {
+        conversation.startListening();
+      }
+    }
+  }, [conversation, onVoiceInput]);
 
   /**
    * Initialize voice activity detection
@@ -67,12 +111,21 @@ function CallPreview({
         ...VAD_PRESETS.normal,
         onSpeechStart: () => {
           console.log('Speech started');
-          conversation.onSpeechDetected();
+          // Only detect speech if we're in listening state
+          if (conversation.currentState === 'listening') {
+            conversation.onSpeechDetected();
+          }
         },
         onSpeechEnd: async (duration) => {
           console.log('Speech ended, duration:', duration);
-          if (audioChunksRef.current.length > 0) {
+          // Only process if we're in processing state (speech was detected)
+          // and we have audio chunks
+          if (conversation.currentState === 'processing' && audioChunksRef.current.length > 0) {
             await processAudioInput();
+          } else if (conversation.currentState === 'listening') {
+            // If we're still in listening state, it means speech was too short or invalid
+            // Just clear chunks and continue listening
+            audioChunksRef.current = [];
           }
         },
         onVolumeChange: (volume) => {
@@ -92,7 +145,7 @@ function CallPreview({
       setVadError(error.message);
       conversation.setError(error);
     }
-  }, [conversation]);
+  }, [conversation, processAudioInput]);
 
   /**
    * Start listening for voice input
@@ -126,14 +179,22 @@ function CallPreview({
         };
       }
 
-      // Start recording
+      // Start or resume recording (keep it running continuously)
       if (mediaRecorderRef.current.state === 'inactive') {
         mediaRecorderRef.current.start(100); // Collect data every 100ms
+        console.log('MediaRecorder started');
+      } else if (mediaRecorderRef.current.state === 'paused') {
+        mediaRecorderRef.current.resume();
+        console.log('MediaRecorder resumed');
       }
 
-      // Initialize VAD if not already done
+      // Initialize or restart VAD if needed
       if (!vadRef.current) {
         await initializeVAD(audioStreamRef.current);
+      } else if (!vadRef.current.isActive) {
+        // Restart VAD if it was stopped
+        vadRef.current.start();
+        console.log('VAD restarted');
       }
 
     } catch (error) {
@@ -141,66 +202,11 @@ function CallPreview({
       conversation.setError(error);
     }
   }, [initializeVAD, conversation]);
-
-  /**
-   * Process audio input and send to backend
-   */
-  const processAudioInput = useCallback(async () => {
-    if (audioChunksRef.current.length === 0) return;
-
-    try {
-      conversation.startProcessing();
-
-      // Create audio blob from chunks
-      const audioBlob = new Blob(audioChunksRef.current, { 
-        type: audioChunksRef.current[0]?.type || 'audio/webm' 
-      });
-
-      // Clear chunks for next recording
-      audioChunksRef.current = [];
-
-      // Send to parent component for processing
-      if (onVoiceInput) {
-        await onVoiceInput(audioBlob);
-      }
-
-    } catch (error) {
-      console.error('Failed to process audio input:', error);
-      conversation.setError(error);
-    }
-  }, [conversation, onVoiceInput]);
-
-  /**
-   * Handle conversation start/stop
-   */
-  const handleConversationToggle = useCallback(async () => {
-    if (conversation.mode === 'conversational') {
-      // End conversation
-      conversation.endConversation();
-      cleanup();
-      if (onStopCall) {
-        onStopCall();
-      }
-    } else {
-      // Start conversation
-      conversation.startConversation();
-      if (onStartCall) {
-        onStartCall();
-      }
-    }
-  }, [conversation, onStartCall, onStopCall]);
-
-  /**
-   * Handle speaking interruption
-   */
-  const handleInterrupt = useCallback(() => {
-    if (conversation.canInterrupt()) {
-      conversation.interruptSpeaking();
-      if (onInterruptSpeaking) {
-        onInterruptSpeaking();
-      }
-    }
-  }, [conversation, onInterruptSpeaking]);
+  
+  // Update ref whenever startListening changes
+  useEffect(() => {
+    startListeningRef.current = startListening;
+  }, [startListening]);
 
   /**
    * Cleanup resources
@@ -230,17 +236,63 @@ function CallPreview({
     setVadError(null);
   }, []);
 
-  // Notify parent when speaking starts/ends
-  useEffect(() => {
-    if (conversation.currentState === 'speaking') {
-      conversation.startSpeaking();
-    } else if (conversation.currentState === 'listening' && conversation.mode === 'conversational') {
-      // Auto-restart listening after speaking
-      setTimeout(() => {
-        startListening();
-      }, 500);
+  /**
+   * Handle conversation start/stop
+   */
+  const handleConversationToggle = useCallback(async () => {
+    if (conversation.mode === 'conversational') {
+      // End conversation
+      conversation.endConversation();
+      cleanup();
+      if (onStopCall) {
+        onStopCall();
+      }
+    } else {
+      // Start conversation
+      conversation.startConversation();
+      if (onStartCall) {
+        onStartCall();
+      }
+      // Start listening will be triggered by the useEffect that watches conversation.currentState
     }
-  }, [conversation.currentState, conversation.mode, startListening, conversation]);
+  }, [conversation, onStartCall, onStopCall, cleanup]);
+
+  /**
+   * Handle speaking interruption
+   */
+  const handleInterrupt = useCallback(() => {
+    if (conversation.canInterrupt()) {
+      conversation.interruptSpeaking();
+      if (onInterruptSpeaking) {
+        onInterruptSpeaking();
+      }
+    }
+  }, [conversation, onInterruptSpeaking]);
+
+  // Sync speaking state from parent component
+  useEffect(() => {
+    if (isSpeaking && conversation.currentState !== 'speaking') {
+      // Parent component started speaking
+      conversation.startSpeaking();
+    } else if (!isSpeaking && conversation.currentState === 'speaking') {
+      // Parent component finished speaking
+      conversation.finishSpeaking();
+    }
+  }, [isSpeaking, conversation]);
+
+  // Handle conversation state changes - restart listening when returning to listening state
+  useEffect(() => {
+    if (conversation.currentState === 'listening' && conversation.mode === 'conversational') {
+      // Auto-restart listening after speaking or when entering listening state
+      const timeoutId = setTimeout(() => {
+        if (startListeningRef.current) {
+          startListeningRef.current();
+        }
+      }, 300);
+      
+      return () => clearTimeout(timeoutId);
+    }
+  }, [conversation.currentState, conversation.mode]);
 
   // Get status text based on current state
   const getStatusText = () => {

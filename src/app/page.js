@@ -461,18 +461,27 @@ export default function Home() {
         { role: 'assistant', content: result.reply }
       ]);
 
+      setIsCallProcessing(false);
+
       if (result.reply && conversationalMode) {
         // In conversational mode, speak immediately
         setTimeout(() => {
           speakTextWithInterruption(result.reply, () => {
             // Speech completed, ready for next input
             console.log('Call response speech completed');
+            setIsCallSpeaking(false);
+            // The conversation state will automatically return to listening
+            // via the CallPreview component's useEffect
+          }, () => {
+            // Speech interrupted
+            setIsCallSpeaking(false);
           });
         }, 300);
+      } else {
+        setIsCallProcessing(false);
       }
     } catch (err) {
       setError(err.message || 'Failed to process call audio');
-    } finally {
       setIsCallProcessing(false);
     }
   }, [convertToWav, speakTextWithInterruption, conversationalMode]);
