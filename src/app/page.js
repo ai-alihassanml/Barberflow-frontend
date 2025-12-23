@@ -453,7 +453,7 @@ export default function Home() {
       }
 
       const audioFile = new File([wavBlob], 'call-recording.wav', { type: 'audio/wav' });
-      const result = await voiceChat(audioFile);
+      const result = await voiceChat(audioFile, callMessages);
 
       setCallMessages(prev => [
         ...prev,
@@ -484,7 +484,7 @@ export default function Home() {
       setError(err.message || 'Failed to process call audio');
       setIsCallProcessing(false);
     }
-  }, [convertToWav, speakTextWithInterruption, conversationalMode]);
+  }, [convertToWav, speakTextWithInterruption, conversationalMode, callMessages]);
 
   // Handle voice input from conversational call
   const handleCallVoiceInput = useCallback(async (audioBlob) => {

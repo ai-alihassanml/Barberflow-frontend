@@ -92,9 +92,21 @@ export async function transcribeAudio(audioFile) {
   return await response.json();
 }
 
-export async function voiceChat(audioFile) {
+export async function voiceChat(audioFile, history = []) {
   const formData = new FormData();
   formData.append('file', audioFile);
+
+  if (Array.isArray(history) && history.length > 0) {
+    formData.append(
+      'history',
+      JSON.stringify(
+        history.map((msg) => ({
+          role: msg.role,
+          content: msg.content,
+        }))
+      )
+    );
+  }
 
   const response = await fetch(`${API_URL}/voice/chat`, {
     method: 'POST',
